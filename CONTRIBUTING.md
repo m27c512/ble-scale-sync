@@ -180,7 +180,7 @@ ble-scale-sync/
 │       ├── eufy-p2.ts               # Eufy P2 / P2 Pro (T9148/T9149, AES-128 handshake)
 │       ├── eufy-c20-p3.ts           # Eufy C20 / P3 (T9130/T9150, broadcast only)
 │       ├── beurer-sanitas.ts        # Beurer BF700/710/800, Sanitas SBF70/75
-│       ├── sanitas-sbf72.ts         # Sanitas SBF72/73, Beurer BF915
+│       ├── sanitas-sbf72.ts         # Sanitas SBF72/73
 │       ├── soehnle.ts               # Soehnle Shape / Style
 │       ├── medisana-bs44x.ts        # Medisana BS430/440/444
 │       ├── trisa.ts                 # Trisa Body Analyze

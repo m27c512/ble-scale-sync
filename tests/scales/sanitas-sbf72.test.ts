@@ -2,9 +2,10 @@ import { describe, it, expect, vi } from 'vitest';
 import { SanitasSbf72Adapter } from '../../src/scales/sanitas-sbf72.js';
 import { uuid16 } from '../../src/scales/body-comp-helpers.js';
 import { isHistoricalReading } from '../../src/interfaces/reading-time.js';
-import type { MultiCharNotify } from '../../src/interfaces/scale-adapter.js';
+import type { ConnectionContext, MultiCharNotify } from '../../src/interfaces/scale-adapter.js';
 import {
   mockPeripheral,
+  makeConnectionContext,
   defaultProfile,
   assertPayloadRanges,
 } from '../helpers/scale-test-utils.js';
@@ -269,5 +270,138 @@ describe('SanitasSbf72Adapter: 0x2A9D and the SIG time stamp', () => {
     const reading = charParser(makeAdapter())(CHR_WSS, WSS);
     expect(reading!.timestamp).toEqual(new Date(2026, 4, 12, 18, 53, 54));
     expect(isHistoricalReading(reading!)).toBe(true);
+  });
+});
+
+// openScale SanitasSbf72Handler: Current Time, vendor user list on 0xFFFF
+// 0x0001, UDS consent on 0x2A9F with the slot's code, then `00` on 0x0006 to
+// take the measurement. On USER_NOT_AUTHORIZED, `0x10 + slot` on 0x0001 makes
+// the scale display the code. Frames built from that handler's layout; no
+// SBF72 capture exists.
+describe('SanitasSbf72Adapter: openScale connection sequence', () => {
+  const UCP = uuid16(0x2a9f);
+  const TIME = uuid16(0x2a2b);
+  const LIST = uuid16(0x0001);
+  const TAKE = uuid16(0x0006);
+  const ALL = new Set([uuid16(0x2a9d), uuid16(0x2a9c), UCP, TIME, LIST, TAKE]);
+
+  /** `00 <index> <initials> <year LE> <month> <day> <height> <gender> <activity>`. */
+  function slotFrame(index: number, year: number, height: number, gender: number): Buffer {
+    return Buffer.from([0x00, index, 0x4d, 0x41, 0x52, year & 0xff, year >> 8, 5, 15, height, gender, 3]);
+  }
+
+  function writesTo(ctx: ConnectionContext, uuid: string): number[][] {
+    return (ctx.write as ReturnType<typeof vi.fn>).mock.calls
+      .filter((c) => c[0] === uuid)
+      .map((c) => Array.from(c[1] as number[]));
+  }
+
+  it('is no longer a hardcoded legacy unlock', () => {
+    const a = makeAdapter() as unknown as Record<string, unknown>;
+    expect(a.unlockCommand).toBeUndefined();
+    expect(a.unlockIntervalMs).toBeUndefined();
+  });
+
+  it('consents with the configured slot and code, then requests the measurement', async () => {
+    const a = makeAdapter();
+    a.onSessionStart();
+    const ctx = makeConnectionContext({
+      availableChars: ALL,
+      scaleAuth: { pin: 1234, userIndex: 2 },
+    });
+    await a.onConnected(ctx);
+    expect(writesTo(ctx, TIME)).toHaveLength(1);
+    expect(writesTo(ctx, LIST)).toEqual([[0x00]]);
+    expect(writesTo(ctx, UCP)).toEqual([[0x02, 0x02, 0xd2, 0x04]]);
+    expect(writesTo(ctx, TAKE)).toEqual([]);
+
+    a.parseCharNotification(UCP, Buffer.from([0x20, 0x02, 0x01]));
+    expect(writesTo(ctx, TAKE)).toEqual([[0x00]]);
+    a.onSessionEnd();
+  });
+
+  it('defaults to code 0 on slot 1 when config names neither', async () => {
+    const a = makeAdapter();
+    a.onSessionStart();
+    const ctx = makeConnectionContext({ availableChars: new Set([uuid16(0x2a9c), UCP]) });
+    await a.onConnected(ctx);
+    expect(writesTo(ctx, UCP)).toEqual([[0x02, 0x01, 0x00, 0x00]]);
+    a.onSessionEnd();
+  });
+
+  it('picks the one stored slot that matches the profile', async () => {
+    const a = makeAdapter();
+    a.onSessionStart();
+    const year = new Date().getFullYear() - 30; // defaultProfile: 30, 183 cm, male
+    const ctx = makeConnectionContext({ availableChars: ALL });
+    const connected = a.onConnected(ctx);
+    await new Promise((r) => setImmediate(r));
+    a.parseCharNotification(LIST, slotFrame(1, 1960, 165, 1));
+    a.parseCharNotification(LIST, slotFrame(3, year, 183, 0));
+    a.parseCharNotification(LIST, Buffer.from([0x01]));
+    await connected;
+    expect(writesTo(ctx, UCP)).toEqual([[0x02, 0x03, 0x00, 0x00]]);
+    a.onSessionEnd();
+  });
+
+  it('falls back to slot 1 when no slot matches', async () => {
+    const a = makeAdapter();
+    a.onSessionStart();
+    const ctx = makeConnectionContext({ availableChars: ALL });
+    const connected = a.onConnected(ctx);
+    await new Promise((r) => setImmediate(r));
+    a.parseCharNotification(LIST, slotFrame(2, 1960, 165, 1));
+    a.parseCharNotification(LIST, Buffer.from([0x01]));
+    await connected;
+    expect(writesTo(ctx, UCP)).toEqual([[0x02, 0x01, 0x00, 0x00]]);
+    a.onSessionEnd();
+  });
+
+  it('asks the scale to show the code when the consent is refused', async () => {
+    const a = makeAdapter();
+    a.onSessionStart();
+    const ctx = makeConnectionContext({
+      availableChars: ALL,
+      scaleAuth: { pin: 0, userIndex: 2 },
+    });
+    await a.onConnected(ctx);
+    a.parseCharNotification(UCP, Buffer.from([0x20, 0x02, 0x05]));
+    expect(writesTo(ctx, LIST)).toEqual([[0x00], [0x12]]);
+    expect(writesTo(ctx, TAKE)).toEqual([]);
+    // The echo of that request is not a user record.
+    expect(a.parseCharNotification(LIST, Buffer.from([0x12, 0x00]))).toBeNull();
+    a.onSessionEnd();
+  });
+
+  it('re-sends the consent until it is answered, and stops at session end', async () => {
+    vi.useFakeTimers();
+    try {
+      const a = makeAdapter();
+      a.onSessionStart();
+      const ctx = makeConnectionContext({ availableChars: new Set([uuid16(0x2a9c), UCP]) });
+      await a.onConnected(ctx);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(writesTo(ctx, UCP)).toHaveLength(3);
+      a.parseCharNotification(UCP, Buffer.from([0x20, 0x02, 0x01]));
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(writesTo(ctx, UCP)).toHaveLength(3);
+
+      a.onSessionStart();
+      const next = makeConnectionContext({ availableChars: new Set([uuid16(0x2a9c), UCP]) });
+      await a.onConnected(next);
+      a.onSessionEnd();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(writesTo(next, UCP)).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('fails clearly when the User Control Point is missing', async () => {
+    const a = makeAdapter();
+    a.onSessionStart();
+    await expect(
+      a.onConnected(makeConnectionContext({ availableChars: new Set([uuid16(0x2a9c)]) })),
+    ).rejects.toThrow(/User Control Point/);
   });
 });

@@ -39,7 +39,7 @@ _Weight only_ means weight is reported normally but body composition is estimate
 | **Beurer** BF700 / BF710 / BF800                                               | Yes              | BF710: register it in the Beurer app first                                                                                                    |
 | **Salter** SA00656 / SA00432 (Salter Health)                                   | Weight only      | Powers off after weighing; suits continuous mode                                                                                              |
 | **Sanitas** SBF70 / SBF75                                                      | Yes              |                                                                                                                                               |
-| **Sanitas** SBF72 / SBF73                                                      | Yes              | Needs user slot 1 in the vendor app                                                                                                           |
+| **Sanitas** SBF72 / SBF73                                                      | Yes              | Uses `users[].beurer_pin` / `beurer_user_index` when slot 1 with code 0 is not yours                                                          |
 | **Beurer** BF720 / BF105 / BF500 / BF788 / BF915 / BF950                       | Yes              | Needs `users[].beurer_pin` and a bonded link                                                                                                  |
 | **A&D** UC-352BLE                                                              | Weight only      | Not confirmed on hardware yet; Linux (BlueZ) only, needs `ble.scale_mac` and a one-time pairing, see below                                    |
 | **Soehnle** Shape200 / Shape100 / Shape50 / Style100                           | Yes              | Needs user slot 1 in the vendor app                                                                                                           |
@@ -85,9 +85,13 @@ We recommend setting `scale_mac` in `config.yaml`. It prevents the app from acci
 
 Everything below still works; these are the quirks worth knowing before you buy or debug.
 
-### **Soehnle**, **Sanitas** SBF72/73
+### **Soehnle**
 
 Create user slot 1 in the manufacturer's phone app first.
+
+### **Sanitas** SBF72/73
+
+The scale only measures for a user slot it has a consent code for. Without config it tries slot 1 with code 0, or the one stored slot whose birth year, height and gender match your profile; the log lists every slot the scale holds. If the scale refuses, it shows the slot's code on its display: put it in `users[].beurer_pin` (and the slot in `users[].beurer_user_index`).
 
 ### **Standard GATT**
 
